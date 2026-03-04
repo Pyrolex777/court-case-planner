@@ -1,5 +1,8 @@
 const STORAGE_KEY = "court-case-planner-records";
 const API_TOKEN_KEY = "court-case-planner-api-token";
+const COURTLISTENER_SEARCH_URL = "https://www.courtlistener.com/api/rest/v4/search/";
+const COURTLISTENER_CITATION_URL =
+  "https://www.courtlistener.com/api/rest/v4/citation-lookup/";
 
 const COURTS = [
   { id: "la-superior", label: "Los Angeles County Superior Court", shortCode: "LASC" },
@@ -639,6 +642,7 @@ const state = {
   researchResults: [],
   citationMatches: [],
   researchQuery: "",
+  manualCheckStates: {},
 };
 
 const form = document.querySelector("#case-form");
@@ -650,6 +654,7 @@ const flowNodes = document.querySelector("#flow-nodes");
 const savedCaseList = document.querySelector("#saved-case-list");
 const newCaseButton = document.querySelector("#new-case-button");
 const saveButton = document.querySelector("#save-button");
+const statusCheckButton = document.querySelector("#status-check-button");
 const printButton = document.querySelector("#print-button");
 const researchForm = document.querySelector("#research-form");
 const researchQueryInput = document.querySelector("#research-query");
@@ -664,6 +669,7 @@ const researchStatus = document.querySelector("#research-status");
 const officialLinks = document.querySelector("#official-links");
 const citationResults = document.querySelector("#citation-results");
 const researchResults = document.querySelector("#research-results");
+const statusCheckContent = document.querySelector("#status-check-content");
 
 boot();
 
@@ -676,6 +682,7 @@ function boot() {
   renderOfficialLinks();
   renderCitationMatches();
   renderResearchResults();
+  renderStatusCheck();
   renderCurrentPlan();
 
   courtSelect.addEventListener("change", (event) => {
@@ -683,14 +690,21 @@ function boot() {
     state.currentCaseId = createPlannerCaseId(event.target.value);
     caseIdElement.textContent = state.currentCaseId;
     state.activeSavedCaseId = "";
+    ensureManualChecklistState(getSelectedRoute());
     renderSavedCases();
     renderOfficialLinks();
+    renderStatusCheck();
     renderCurrentPlan();
   });
 
-  trackSelect.addEventListener("change", renderCurrentPlan);
+  trackSelect.addEventListener("change", () => {
+    ensureManualChecklistState(getSelectedRoute());
+    renderStatusCheck();
+    renderCurrentPlan();
+  });
   form.addEventListener("submit", handleGenerate);
   saveButton.addEventListener("click", handleSave);
+  statusCheckButton.addEventListener("click", handleStatusCheck);
   printButton.addEventListener("click", () => window.print());
   researchForm.addEventListener("submit", handleResearchSearch);
   verifyCitationButton.addEventListener("click", handleCitationLookup);
@@ -703,12 +717,19 @@ function boot() {
     renderOfficialLinks();
     renderCitationMatches();
     renderResearchResults();
+    renderStatusCheck();
     renderCurrentPlan();
   });
 
   form.querySelectorAll("input, select, textarea").forEach((field) => {
-    field.addEventListener("input", renderCurrentPlan);
-    field.addEventListener("change", renderCurrentPlan);
+    field.addEventListener("input", () => {
+      renderStatusCheck();
+      renderCurrentPlan();
+    });
+    field.addEventListener("change", () => {
+      renderStatusCheck();
+      renderCurrentPlan();
+    });
   });
 }
 
@@ -756,10 +777,17 @@ function handleSave() {
   state.activeSavedCaseId = snapshot.plannerCaseId;
   persistRecords();
   renderSavedCases();
+  renderStatusCheck();
 }
 
 function collectFormData() {
   const route = getSelectedRoute();
+  const manualCheckStates = Object.fromEntries(
+    Object.entries(state.manualCheckStates).map(([routeId, values]) => [
+      routeId,
+      Array.isArray(values) ? [...values] : [],
+    ]),
+  );
   return {
     plannerCaseId: state.currentCaseId,
     caseTitle: document.querySelector("#case-title").value.trim(),
@@ -774,8 +802,9 @@ function collectFormData() {
     lastUpdated: new Date().toISOString(),
     routeLabel: route ? route.label : "",
     researchQuery: researchQueryInput.value.trim(),
-    researchResults: state.researchResults,
-    citationMatches: state.citationMatches,
+    researchResults: state.researchResults.map((item) => ({ ...item })),
+    citationMatches: state.citationMatches.map((item) => ({ ...item })),
+    manualCheckStates,
   };
 }
 
@@ -923,6 +952,11 @@ function renderReport(route, data) {
       </section>
 
       <section class="report-section">
+        <h3>Status Check</h3>
+        ${renderStatusSummary(route, data)}
+      </section>
+
+      <section class="report-section">
         <h3>Research Topics</h3>
         <ul class="report-list">
           ${route.researchPrompts.map((prompt) => `<li>${escapeHtml(prompt)}</li>`).join("")}
@@ -982,6 +1016,660 @@ function renderSavedCases() {
   });
 }
 
+function handleStatusCheck() {
+  renderStatusCheck();
+  document.querySelector("#status-check-panel").scrollIntoView({ behavior: "smooth" });
+}
+
+function renderStatusCheck() {
+  const route = getSelectedRoute();
+  const data = collectFormData();
+
+  if (!route) {
+    statusCheckContent.innerHTML =
+      '<div class="empty-state">Select a court track to run the status check.</div>';
+    return;
+  }
+
+  const summary = computeStatusCheck(route, data);
+  statusCheckContent.innerHTML = `
+    <div class="status-score">
+      <span class="score-badge">${summary.score}% complete</span>
+      <span class="status-chip">${escapeHtml(summary.readinessLabel)}</span>
+      <span>${escapeHtml(summary.completedCount)} of ${escapeHtml(summary.totalCount)} checks satisfied</span>
+    </div>
+
+    <div class="status-check-grid">
+      <section class="status-card">
+        <h3>Automatic Checks</h3>
+        <ul>
+          ${summary.autoChecks
+            .map(
+              (check) => `
+                <li class="${check.passed ? "status-pass" : "status-warn"}">
+                  <strong>${check.passed ? "Pass" : "Pending"}:</strong>
+                  ${escapeHtml(check.label)}. ${escapeHtml(check.detail)}
+                </li>
+              `,
+            )
+            .join("")}
+        </ul>
+      </section>
+
+      <section class="status-card">
+        <h3>Manual Procedure Confirmations</h3>
+        <div class="manual-check-list">
+          ${summary.manualChecks
+            .map(
+              (check, index) => `
+                <label class="manual-check-item">
+                  <input
+                    type="checkbox"
+                    data-manual-check-index="${index}"
+                    ${check.passed ? "checked" : ""}
+                  />
+                  <span>${escapeHtml(check.label)}</span>
+                </label>
+              `,
+            )
+            .join("")}
+        </div>
+      </section>
+
+      <section class="status-card">
+        <h3>Follow-Up Items</h3>
+        ${
+          summary.followUpItems.length
+            ? `
+              <ul>
+                ${summary.followUpItems
+                  .map((item) => `<li class="status-fail">${escapeHtml(item)}</li>`)
+                  .join("")}
+              </ul>
+            `
+            : "<p class=\"status-pass\">No unresolved follow-up items are currently flagged by this checker.</p>"
+        }
+      </section>
+    </div>
+  `;
+
+  statusCheckContent
+    .querySelectorAll("[data-manual-check-index]")
+    .forEach((checkbox) =>
+      checkbox.addEventListener("change", () => {
+        updateManualChecklistState(Number(checkbox.dataset.manualCheckIndex), checkbox.checked);
+      }),
+    );
+}
+
+function computeStatusCheck(route, data) {
+  const manualState = ensureManualChecklistState(route);
+  const deadlineRequired = [
+    "judgment-entered",
+    "appeal-window",
+    "appellate-briefing",
+    "emergency",
+    "discretionary-review",
+  ].includes(data.stage);
+  const autoChecks = [
+    {
+      label: "Case identity entered",
+      passed: Boolean(data.caseTitle && data.partyRole),
+      detail: data.caseTitle && data.partyRole
+        ? "Case title and party role are both present."
+        : "Add both a case title and the user's role in the matter.",
+    },
+    {
+      label: "Court and procedure track selected",
+      passed: Boolean(data.court && data.track),
+      detail: data.court && data.track
+        ? "A court and route are selected."
+        : "Pick the court and route before relying on the procedure output.",
+    },
+    {
+      label: "Objective described",
+      passed: data.objective.trim().length >= 12,
+      detail: data.objective.trim().length >= 12
+        ? "The case goal is described with enough detail to guide research."
+        : "Describe the filing goal or issue to be resolved.",
+    },
+    {
+      label: "Case notes recorded",
+      passed: data.notes.trim().length >= 20,
+      detail: data.notes.trim().length >= 20
+        ? "Notes exist for facts or procedural history."
+        : "Add facts, order history, or case context to support procedure review.",
+    },
+    {
+      label: "Deadline captured when timing is material",
+      passed: !deadlineRequired || Boolean(data.deadline),
+      detail:
+        !deadlineRequired || data.deadline
+          ? "Deadline coverage is acceptable for the selected stage."
+          : "Enter the known filing or response deadline for this stage.",
+    },
+    {
+      label: "Research activity recorded",
+      passed: state.researchResults.length > 0 || state.citationMatches.length > 0,
+      detail:
+        state.researchResults.length > 0 || state.citationMatches.length > 0
+          ? "The matter has live research or citation verification results."
+          : "Run live caselaw search or verify a citation before treating the plan as ready.",
+    },
+    {
+      label: "Official authority bank available",
+      passed: route.authorities.length > 0,
+      detail: route.authorities.length > 0
+        ? "The selected route includes seeded official rules or court sources."
+        : "No authority bank is attached to this route yet.",
+    },
+  ];
+
+  const manualChecks = route.checklist.map((label, index) => ({
+    label,
+    passed: Boolean(manualState[index]),
+  }));
+
+  const allChecks = [...autoChecks, ...manualChecks];
+  const completedCount = allChecks.filter((check) => check.passed).length;
+  const totalCount = allChecks.length || 1;
+  const score = Math.round((completedCount / totalCount) * 100);
+  const followUpItems = [
+    ...autoChecks.filter((check) => !check.passed).map((check) => check.detail),
+    ...manualChecks
+      .filter((check) => !check.passed)
+      .map((check) => `Manual procedure confirmation still pending: ${check.label}`),
+  ];
+
+  let readinessLabel = "High risk of procedural gaps";
+  if (score >= 85) {
+    readinessLabel = "Substantially ready for procedure review";
+  } else if (score >= 60) {
+    readinessLabel = "Needs targeted follow-up";
+  }
+
+  return {
+    score,
+    readinessLabel,
+    completedCount,
+    totalCount,
+    autoChecks,
+    manualChecks,
+    followUpItems,
+  };
+}
+
+function renderStatusSummary(route, data) {
+  const summary = computeStatusCheck(route, data);
+  return `
+    <p><strong>${escapeHtml(summary.readinessLabel)}</strong> with ${escapeHtml(
+      summary.score,
+    )}% of tracked checks satisfied.</p>
+    <ul class="warning-list">
+      ${summary.followUpItems.length
+        ? summary.followUpItems
+            .slice(0, 4)
+            .map((item) => `<li>${escapeHtml(item)}</li>`)
+            .join("")
+        : "<li>No follow-up items are currently flagged by the status checker.</li>"}
+    </ul>
+  `;
+}
+
+function ensureManualChecklistState(route) {
+  if (!route) {
+    return [];
+  }
+
+  const existing = state.manualCheckStates[route.id];
+  const next = Array.isArray(existing) ? [...existing] : [];
+  while (next.length < route.checklist.length) {
+    next.push(false);
+  }
+  state.manualCheckStates[route.id] = next.slice(0, route.checklist.length);
+  return state.manualCheckStates[route.id];
+}
+
+function updateManualChecklistState(index, checked) {
+  const route = getSelectedRoute();
+  if (!route) {
+    return;
+  }
+
+  const manualState = ensureManualChecklistState(route);
+  manualState[index] = checked;
+  state.manualCheckStates[route.id] = manualState;
+  renderStatusCheck();
+  renderCurrentPlan();
+}
+
+function renderOfficialLinks() {
+  const links = OFFICIAL_LINKS[courtSelect.value] || [];
+
+  officialLinks.innerHTML = `
+    <section class="status-card">
+      <h3>Official Court Links</h3>
+      <div class="official-links-grid">
+        ${links
+          .map(
+            (link) => `
+              <article class="official-link-card">
+                <strong>${escapeHtml(link.label)}</strong>
+                <p>${escapeHtml(link.detail)}</p>
+                <a href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(
+                  link.url,
+                )}</a>
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCitationMatches() {
+  if (!state.citationMatches.length) {
+    citationResults.innerHTML = "";
+    return;
+  }
+
+  citationResults.innerHTML = `
+    <section class="status-card">
+      <h3>Citation Check Results</h3>
+      <div class="citation-match-list">
+        ${state.citationMatches
+          .map(
+            (match) => `
+              <article class="citation-match-card">
+                <strong>${escapeHtml(match.caseName || "Matched opinion")}</strong>
+                <p>${escapeHtml(match.matchType || "Citation match")}</p>
+                <div class="result-meta">
+                  ${[match.court, match.dateFiled]
+                    .filter(Boolean)
+                    .map((value) => `<span class="meta-chip">${escapeHtml(value)}</span>`)
+                    .join("")}
+                </div>
+                ${
+                  match.citationList && match.citationList.length
+                    ? `<div class="result-citations">${match.citationList
+                        .map((citation) => `<span class="citation-chip">${escapeHtml(citation)}</span>`)
+                        .join("")}</div>`
+                    : ""
+                }
+                ${
+                  match.url
+                    ? `<div class="result-actions"><a href="${escapeHtml(
+                        match.url,
+                      )}" target="_blank" rel="noreferrer">${escapeHtml(match.url)}</a></div>`
+                    : ""
+                }
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderResearchResults() {
+  if (!state.researchResults.length) {
+    researchResults.innerHTML = "";
+    return;
+  }
+
+  researchResults.innerHTML = `
+    <section class="status-card">
+      <h3>Live Caselaw Results</h3>
+      <div class="research-result-list">
+        ${state.researchResults
+          .map(
+            (result, index) => `
+              <article class="research-result-card">
+                <strong>${escapeHtml(result.caseName || "Untitled opinion")}</strong>
+                <p>${escapeHtml(result.snippet || "No summary snippet returned.")}</p>
+                <div class="result-meta">
+                  ${[result.court, result.dateFiled, result.docketNumber]
+                    .filter(Boolean)
+                    .map((value) => `<span class="meta-chip">${escapeHtml(value)}</span>`)
+                    .join("")}
+                </div>
+                ${
+                  result.citation && result.citation.length
+                    ? `<div class="result-citations">${result.citation
+                        .slice(0, 4)
+                        .map((citation) => `<span class="citation-chip">${escapeHtml(citation)}</span>`)
+                        .join("")}</div>`
+                    : ""
+                }
+                <div class="result-actions">
+                  <a href="${escapeHtml(result.absolute_url)}" target="_blank" rel="noreferrer">${escapeHtml(
+                    result.absolute_url,
+                  )}</a>
+                  <button class="inline-button" type="button" data-action="citation" data-result-index="${index}">
+                    Use Citation
+                  </button>
+                  <button class="inline-button" type="button" data-action="note" data-result-index="${index}">
+                    Add to Notes
+                  </button>
+                </div>
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+
+  researchResults.querySelectorAll("[data-result-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const result = state.researchResults[Number(button.dataset.resultIndex)];
+      if (!result) {
+        return;
+      }
+
+      if (button.dataset.action === "citation") {
+        citationInput.value = (result.citation && result.citation[0]) || result.caseName || "";
+        setResearchStatus("Primary citation copied into the citation check field.", "success");
+        return;
+      }
+
+      const notePrefix = `${result.caseName || "Opinion"} | ${result.court || "Court"} | ${
+        result.dateFiled || "Date unknown"
+      }`;
+      const nextNote = `${notePrefix}\n${result.absolute_url}`;
+      const notesField = document.querySelector("#notes");
+      notesField.value = notesField.value.trim()
+        ? `${notesField.value.trim()}\n\n${nextNote}`
+        : nextNote;
+      renderStatusCheck();
+      renderCurrentPlan();
+      setResearchStatus("Selected opinion added to case notes.", "success");
+    });
+  });
+}
+
+async function handleResearchSearch(event) {
+  event.preventDefault();
+
+  const query = researchQueryInput.value.trim();
+  const limit = Number(researchLimitSelect.value) || 8;
+  const scope = researchScopeSelect.value;
+
+  if (!query) {
+    setResearchStatus("Enter a query or use the case outline to build one.", "warn");
+    return;
+  }
+
+  setResearchBusy(true);
+  setResearchStatus("Searching live opinions...", "info");
+
+  try {
+    const params = new URLSearchParams({
+      q: query,
+      type: "o",
+      order_by: "score desc",
+    });
+    const payload = await fetchJson(`${COURTLISTENER_SEARCH_URL}?${params.toString()}`);
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const filtered = scope === "selected" ? filterResultsForCourt(results, courtSelect.value) : results;
+    const finalResults = (filtered.length ? filtered : results)
+      .slice(0, limit)
+      .map(normalizeResearchResult);
+
+    state.researchQuery = query;
+    state.researchResults = finalResults;
+    renderResearchResults();
+    renderStatusCheck();
+    renderCurrentPlan();
+
+    if (!finalResults.length) {
+      setResearchStatus("No opinions matched the current research query.", "warn");
+      return;
+    }
+
+    const scopeNote =
+      scope === "selected" && !filtered.length
+        ? " No selected-court matches were found, so broader results are shown."
+        : "";
+    setResearchStatus(`Loaded ${finalResults.length} live opinion result(s).${scopeNote}`, "success");
+  } catch (error) {
+    setResearchStatus(`Live search failed: ${error.message}`, "error");
+  } finally {
+    setResearchBusy(false);
+  }
+}
+
+async function handleCitationLookup() {
+  const query = citationInput.value.trim();
+  if (!query) {
+    setResearchStatus("Enter a citation or case name to verify.", "warn");
+    return;
+  }
+
+  setResearchBusy(true);
+  setResearchStatus("Checking citation...", "info");
+
+  try {
+    let matches = [];
+    const token = apiTokenInput.value.trim();
+
+    if (token) {
+      try {
+        const payload = await fetchJson(COURTLISTENER_CITATION_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Token ${token}`,
+          },
+          body: JSON.stringify({ text: query }),
+        });
+        matches = extractCitationMatches(payload);
+      } catch (error) {
+        matches = [];
+      }
+    }
+
+    if (!matches.length) {
+      const params = new URLSearchParams({
+        q: query,
+        type: "o",
+        order_by: "score desc",
+      });
+      const payload = await fetchJson(`${COURTLISTENER_SEARCH_URL}?${params.toString()}`);
+      matches = buildSearchBasedCitationMatches(payload.results || [], query);
+    }
+
+    state.citationMatches = matches;
+    renderCitationMatches();
+    renderStatusCheck();
+    renderCurrentPlan();
+
+    if (!matches.length) {
+      setResearchStatus("No citation match was found from the available lookup paths.", "warn");
+      return;
+    }
+
+    setResearchStatus(
+      token
+        ? `Citation check returned ${matches.length} match(es).`
+        : `Approximate citation verification returned ${matches.length} match(es). Add an API token if you want to attempt direct lookup.`,
+      "success",
+    );
+  } catch (error) {
+    setResearchStatus(`Citation check failed: ${error.message}`, "error");
+  } finally {
+    setResearchBusy(false);
+  }
+}
+
+function fillSuggestedResearchQuery() {
+  const route = getSelectedRoute();
+  const parts = [
+    document.querySelector("#case-title").value.trim(),
+    document.querySelector("#objective").value.trim(),
+    route && route.researchPrompts.length ? route.researchPrompts[0] : "",
+  ].filter(Boolean);
+
+  researchQueryInput.value = parts.join(" ");
+  setResearchStatus("Research query filled from the current case outline.", "success");
+}
+
+function handleApiTokenChange() {
+  const token = apiTokenInput.value.trim();
+  if (token) {
+    localStorage.setItem(API_TOKEN_KEY, token);
+    setResearchStatus("CourtListener API token stored in this browser.", "success");
+    return;
+  }
+
+  localStorage.removeItem(API_TOKEN_KEY);
+  setResearchStatus("Stored API token cleared from this browser.", "warn");
+}
+
+function loadApiToken() {
+  try {
+    return localStorage.getItem(API_TOKEN_KEY) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
+function setResearchStatus(message, tone) {
+  const toneLabel = {
+    info: "Working",
+    success: "Ready",
+    warn: "Attention",
+    error: "Error",
+  }[tone] || "Status";
+
+  researchStatus.innerHTML = `
+    <span class="status-chip">${escapeHtml(toneLabel)}</span>
+    <div>${escapeHtml(message)}</div>
+  `;
+}
+
+function setResearchBusy(isBusy) {
+  searchResearchButton.disabled = isBusy;
+  verifyCitationButton.disabled = isBusy;
+  fillQueryButton.disabled = isBusy;
+}
+
+function filterResultsForCourt(results, courtId) {
+  return results.filter((result) => matchesSelectedCourt(result, courtId));
+}
+
+function matchesSelectedCourt(result, courtId) {
+  const courtName = normalizeText(result.court || "");
+  const courtCode = normalizeText(result.court_id || "");
+  const courtCitation = normalizeText(result.court_citation_string || "");
+  const haystack = normalizeText([courtName, courtCode, courtCitation].filter(Boolean).join(" "));
+
+  if (courtId === "us-supreme") {
+    return haystack.includes("supreme court of the united states") || haystack.includes("scotus");
+  }
+
+  if (courtId === "us-appeals") {
+    return (
+      courtName.includes("court of appeals") ||
+      courtName.includes("district court") ||
+      haystack.includes("scotus") ||
+      courtName.includes("united states")
+    );
+  }
+
+  return courtName.includes("california") || courtCode.startsWith("cal") || courtCitation.startsWith("cal.");
+}
+
+function normalizeResearchResult(result) {
+  return {
+    ...result,
+    absolute_url: toAbsoluteCourtListenerUrl(result.absolute_url),
+    snippet: truncateText(stripHtml(result.opinions?.[0]?.snippet || result.snippet || result.syllabus || ""), 420),
+  };
+}
+
+function buildSearchBasedCitationMatches(results, query) {
+  const normalizedQuery = normalizeText(query);
+  return results
+    .map(normalizeResearchResult)
+    .filter((result) => {
+      const citations = (result.citation || []).map(normalizeText);
+      const names = normalizeText(result.caseName || "");
+      return citations.some((citation) => citation.includes(normalizedQuery)) || names.includes(normalizedQuery);
+    })
+    .slice(0, 3)
+    .map((result) => ({
+      caseName: result.caseName,
+      court: result.court,
+      dateFiled: result.dateFiled,
+      url: result.absolute_url,
+      citationList: result.citation || [],
+      matchType: "Approximate verification from public opinion search",
+    }));
+}
+
+function extractCitationMatches(payload) {
+  const candidates = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload.matches)
+      ? payload.matches
+      : Array.isArray(payload.results)
+        ? payload.results
+        : [];
+
+  return candidates.slice(0, 5).map((item) => ({
+    caseName: item.caseName || item.case_name || item.canonical_case_name || "Matched opinion",
+    court: item.court || item.court_name || "",
+    dateFiled: item.dateFiled || item.date_filed || "",
+    url: toAbsoluteCourtListenerUrl(item.absolute_url || item.url || ""),
+    citationList: item.citation || item.citations || item.matched_citations || [],
+    matchType: "Direct citation lookup",
+  }));
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    mode: "cors",
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function toAbsoluteCourtListenerUrl(url) {
+  if (!url) {
+    return "";
+  }
+
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    return url;
+  }
+
+  return `https://www.courtlistener.com${url}`;
+}
+
+function stripHtml(value) {
+  return String(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function truncateText(value, limit) {
+  if (value.length <= limit) {
+    return value;
+  }
+
+  return `${value.slice(0, limit - 1).trim()}...`;
+}
+
+function normalizeText(value) {
+  return String(value).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 function loadSavedCase(caseId) {
   const record = state.records.find((item) => item.plannerCaseId === caseId);
   if (!record) {
@@ -1001,18 +1689,35 @@ function loadSavedCase(caseId) {
   document.querySelector("#deadline").value = record.deadline || "";
   document.querySelector("#objective").value = record.objective || "";
   document.querySelector("#notes").value = record.notes || "";
+  researchQueryInput.value = record.researchQuery || "";
+  state.researchQuery = record.researchQuery || "";
+  state.researchResults = Array.isArray(record.researchResults) ? record.researchResults : [];
+  state.citationMatches = Array.isArray(record.citationMatches) ? record.citationMatches : [];
+  state.manualCheckStates = record.manualCheckStates || {};
+  ensureManualChecklistState(getSelectedRoute());
 
   renderSavedCases();
+  renderOfficialLinks();
+  renderCitationMatches();
+  renderResearchResults();
+  renderStatusCheck();
   renderCurrentPlan();
 }
 
 function resetForm() {
   form.reset();
+  researchForm.reset();
+  apiTokenInput.value = loadApiToken();
   courtSelect.value = COURTS[0].id;
   hydrateTracks(COURTS[0].id);
   document.querySelector("#case-type").value = "civil";
   document.querySelector("#stage").value = "pre-filing";
   state.currentCaseId = createPlannerCaseId(courtSelect.value);
+  state.researchQuery = "";
+  state.researchResults = [];
+  state.citationMatches = [];
+  state.manualCheckStates = {};
+  ensureManualChecklistState(getSelectedRoute());
   caseIdElement.textContent = state.currentCaseId;
 }
 

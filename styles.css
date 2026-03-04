@@ -408,7 +408,8 @@ textarea {
 
 .official-links,
 .citation-results,
-.research-results {
+.research-results,
+.status-check-content {
   display: grid;
   gap: 14px;
   margin-top: 18px;
@@ -416,14 +417,17 @@ textarea {
 
 .official-links-grid,
 .research-result-list,
-.citation-match-list {
+.citation-match-list,
+.status-check-grid,
+.manual-check-list {
   display: grid;
   gap: 12px;
 }
 
 .official-link-card,
 .research-result-card,
-.citation-match-card {
+.citation-match-card,
+.status-card {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -483,6 +487,63 @@ textarea {
   color: var(--ink);
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.status-score {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.score-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: linear-gradient(180deg, #f7e5d6, #eed4c4);
+  color: var(--accent-deep);
+  font-weight: 700;
+}
+
+.status-card ul {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.status-pass {
+  color: #215d2b;
+}
+
+.status-warn {
+  color: #8a5a14;
+}
+
+.status-fail {
+  color: #8f2d19;
+}
+
+.manual-check-item {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fffdf9;
+}
+
+.manual-check-item input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.manual-check-item span {
+  display: block;
+  line-height: 1.5;
 }
 
 .report-card {
